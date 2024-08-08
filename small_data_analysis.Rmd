@@ -1,0 +1,761 @@
+### data cleaning(Donor1_CD4)
+
+```{r }
+data1_cd4 <- read.csv("small_dataset/Donor1_CD4_Genes.csv")
+data1_cd8 <- read.csv("small_dataset/Donor1_CD8_Genes.csv")
+data2_cd4 <- read.csv("small_dataset/Donor2_CD4_Genes.csv")
+data2_cd8 <- read.csv("small_dataset/Donor2_CD8_Genes.csv")
+
+protein_coding_genes <- c("MT.CO1", "MT.CO2", "MT.CO3", "MT.CYB", 
+                          "MT.ND1", "MT.ND2", "MT.ND3", "MT.ND4", 
+                          "MT.ND4L", "MT.ND5", "MT.ND6", "MT.ATP6", 
+                          "MT.ATP8")
+
+selected_data1_cd4 <- data1_cd4[c(protein_coding_genes, "non.MT")]
+selected_data1_cd8 <- data1_cd8[c(protein_coding_genes, "non.MT")]
+selected_data2_cd4 <- data2_cd4[c(protein_coding_genes, "non.MT")]
+selected_data2_cd8 <- data2_cd8[c(protein_coding_genes, "non.MT")]
+
+```
+
+### test poisson distribution
+```{r}
+df_subset1_cd4 <- selected_data1_cd4[, -ncol(selected_data1_cd4)]
+means <- colMeans(df_subset1_cd4)
+variances <- apply(df_subset1_cd4, 2, var)
+
+plot(means, variances, xlab = "Mean", ylab = "Variance", main = "Mean vs Variance",
+     pch = 10, col = "blue",type = "p")
+
+text(means, variances, labels = names(df_subset1_cd4), pos = 4, cex = 0.8)
+abline(a = 0, b = 1, col = "red", lty = 2)
+```
+
+### test
+```{r}
+library(ggplot2)
+par(mfrow = c(2, 2)) 
+for (col_name in names(df_subset1_cd4)) {
+  hist(df_subset1_cd4[[col_name]], main = paste("Histogram of", col_name), xlab = col_name, col = "blue")
+}
+
+shapiro.test(df_subset1_cd4$MT.CO1)
+```
+```{r}
+modelString <-"
+model {
+## sampling
+
+for (i in 1:V){
+  for (j in 1:J){
+   n[j,i] ~ dnbinom(r[j], p[j,i])
+  }
+}
+
+## priors
+
+# Initialize r
+for (j in 1:J){
+  r[j] ~ dgamma(e_0,h)
+}
+# Get phi and p
+for (i in 1:V){
+  for (j in 1:J){
+   p[j,i] <- ilogit(phi[j,i])
+  }
+}
+for (i in 1:V){
+  for (j in 1:J){
+    phi[j,i] <- x[j] *beta[i] + inprod(theta[j,] , Phi[i,])
+  }
+}
+
+# Get beta 
+for (i in 1:V){
+  beta[i] ~ dnorm(0,1/sqrt(alpha))
+}
+# Initialize Phi and theta
+for (i in 1:13){
+  Phi[i,1:K] ~ dmnorm(rep(0, K), diag_K)
+}
+
+for (k in 1: K){
+  for (j in 1:J){
+    theta[j,k] ~ dnorm(0,1/sqrt(gamma[k]))
+  }
+}
+
+
+## hyperpriors
+alpha ~ dgamma(e_0, f_0)
+for (k in 1:K){
+  gamma[k] ~ dgamma(e_0, f_0)
+}
+h ~ dgamma(e_0, f_0)
+
+
+for (i in 1:13){
+  for (j in 1:cell_no){
+    w[j,i] <- rpg(1,df[j,i]+ r[j],phi[j,i])
+  }
+}
+}
+"
+```
+
+
+```{r}
+#define the data
+n <- as.matrix(data1_cd4[c(protein_coding_genes)])
+x <- selected_data1_cd4[, ncol(selected_data1_cd4)]
+J <- nrow(n)
+V <- 13
+K <-2
+diag_K <- diag(K)
+data_modelling <- list("n"= n, "x"=x,
+                        "V"=V, "J"=J,
+                        "e_0"=0.01, "f_0"=0.01,
+                        "h"=0.01, "K"=K,
+                       "diag_K"=diag_K)
+
+#get the posteriors
+library(coda)
+library(runjags)
+initsfunction <- function(chain){
+  .RNG.seed <- c(1,2)[chain]
+  .RNG.name <- c("base::Super-Duper",
+                 "base::Wichmann-Hill")[chain]
+  return(list(.RNG.seed=.RNG.seed,
+              .RNG.name=.RNG.name))
+}
+posterior <- run.jags(modelString,
+                      n.chains = 1,
+                      data= data_modelling,
+                      monitor = c("r", "p", "phi"),
+                      adapt = 1000,
+                      sample = 5000,
+                      inits = initsfunction)
+
+```
+```{r}
+failed.jags(c('model','inits'))
+```
+
+```{r}
+library(truncdist)
+library(MASS)
+
+df <- selected_data1_cd4
+
+# Initialize model parameters
+N <- 1 # number of iterations
+K <- 2
+
+cell_no <- nrow(df)
+
+e_0 <- 0.01
+f_0 <- 0.01
+e <- rep(e_0, cell_no)
+
+# prior
+alpha <- rep(1,13)
+gamma <- rep(1,K)
+h <- 1
+
+# Initialize r
+r <- rep(1,cell_no)
+
+# Get beta and define x
+x <- log(df[, ncol(df)])
+beta<- rep(0,13)
+
+# Initialize Phi and theta
+Phi <- matrix(1/13, 13, K)
+
+theta <- matrix(0, cell_no, K)
+
+# Get phi and p
+phi <- x %*% t(beta) + theta %*% t(Phi)
+p <- plogis(phi)
+max(p)
+
+# Define the sample set
+samples <- matrix(0, N, 2)
+
+samples[1, ] <- c(0, exp(phi[1,1]))
+```
+
+### Chinese Restaurant Table Process
+```{r}
+# Define the CRT and PG sampling functions
+crt <- function(n, theta) {
+  table_counts <- c()  # Initialize table counts
+  for (i in 1:n) {
+    if (i == 1) {
+      table_counts <- c(table_counts, 1)
+      table_choice <- 1# First customer sits at the first table
+    } else {
+      probs <- c(table_counts, theta) / (sum(table_counts) + theta)  #  probabilities
+      table_choice <- sample(length(probs), 1, prob = probs)  # Choose a table
+      if (table_choice <= length(table_counts)) {
+        table_counts[table_choice] <- table_counts[table_choice] + 1  # Existing table
+      } else {
+        table_counts <- c(table_counts, 1) 
+        table_choice <- length(table_counts)# New table
+      }
+    }
+  }
+  return(table_choice)
+}
+
+```
+
+### Gibbs Sampling
+```{r}
+library(BayesLogit)
+# Gibbs sampling
+for (iter in 1:N) {
+  
+  # Sample l using the CRT distribution
+  l <- matrix(0,nrow = cell_no, ncol = 13)
+  for (i in 1:13){
+    for (j in 1:cell_no){
+      l[j,i] <- crt(df[j,i], r[j])
+    }
+  }
+  
+  # Update r
+  for (j in 1:cell_no){
+    r[j] <- rgamma(1, e_0+ sum(l[j,]), h - sum(log(1 - p[j]))) 
+  }
+  # Update h
+  h <- rgamma(1, e_0*(1+cell_no), f_0+sum(r))
+  
+  # Draw w
+  w<- matrix(, cell_no,13)
+  for (i in 1:13){
+    for (j in 1:cell_no){
+      w[j,i] <- rpg(1,df[j,i]+ r[j],phi[j,i])
+    }
+  }
+  
+  # Update beta
+  sum_beta <- t(w) %*% x^2
+  sigma_beta <- 1/(alpha+sum_beta)
+  mu_beta <- rep(0, 13)
+  for (i in 1:13){
+    for (j in 1:cell_no){
+      mu_beta[i] <- mu_beta[i]+((df[j,i]-r[j])/2-w[j,i]*(Phi[i,]%*%theta[j,]))*x[j]
+    }
+    mu_beta[i] <- mu_beta[i]*sigma_beta[i]
+  }
+    
+  for (i in 1:13){
+    beta[i] <- rnorm(1,mu_beta[i],sqrt(sigma_beta[i]))
+  }
+  
+  # Update Phi and theta
+  for (i in 1:13){
+    sum_a <-matrix(0,K,K)
+    sum_b <- rep(0,K)
+    for (j in 1:cell_no){
+      sum_a <- sum_a+ w[j,i]*theta[j,]%*%t(theta[j,])
+      sum_b <- sum_b + ((df[j,i]-r[j])/2-w[j,i]*x[j]*beta[i])*theta[j,]
+    }
+    sigma_Phi <-  ginv(diag(K)+sum_a)
+    mu_Phi <- sigma_Phi %*% sum_b
+    Phi[i,] <- mvtnorm::rmvnorm(1, mean = mu_Phi, sigma = sigma_Phi)
+  }
+  
+  for (j in 1: cell_no){
+    sum_x <-matrix(0,K,K)
+    sum_y <- rep(0,K)
+    for (i in 1:13){
+      sum_x <- sum_x+ w[j,i]*Phi[i,]%*%t(Phi[i,])
+      sum_y <- sum_y + ((df[j,i]-r[j])/2-w[j,i]*x[j]*beta[i])*Phi[i,]
+    }
+    sigma_theta <-  ginv(diag(gamma)+sum_x)
+    mu_theta <- sigma_theta %*% sum_y
+    theta[j,] <-mvtnorm::rmvnorm(1, mean = mu_theta, sigma = sigma_theta)
+  }
+  
+  # Update alpha and gamma
+  alpha <- rgamma(13, e_0+13/2,f_0+sum(beta^2)/2)
+  for (k in 1:K){
+    gamma[k] <- rgamma(1, e_0+cell_no/2, f_0+sum(gamma[k]^2))
+  }
+
+  phi <- x %*% t(beta) + theta %*% t(Phi)
+  p <- plogis(phi)
+  
+  samples[iter, 1] <- sum(l[1,])
+  samples[iter, 2] <- phi[1,1]
+
+}
+```
+
+```{r}
+par(mfrow = c(2, 1))
+plot(samples[, 1], type = 'l', main = 'Trace plot for X1', xlab = 'Iteration', ylab = 'X1')
+plot(samples[, 2], type = 'l', main = 'Trace plot for X2', xlab = 'Iteration', ylab = 'X2')
+
+# Summary statistics
+summary(samples)
+```
+
+```{r}
+# Output the results (e.g., gene module membership matrix)
+# Placeholder output, replace with your actual output format
+result <- list(
+  ell_vj = ell_vj,
+  r_j = r_j,
+  omega_vj = omega_vj,
+  alpha_p = alpha_p,
+  gamma_k = gamma_k,
+  loadings = loadings,
+  scores = scores,
+  beta = beta
+)
+
+# Print or return the result as needed
+print(result)
+
+
+```
+
+
+```{r}
+
+l <- matrix(0,nrow = cell_no, ncol = 13)
+for (i in 1:13){
+  for (j in 1:cell_no){
+    l[j,i] <- crt(df[j,i], r[j])
+  }
+}
+
+# Update r
+  for (j in 1:cell_no){
+    r[j] <- rgamma(1, e_0+ sum(l[j,]), h - sum(log(1 - p[j]))) 
+  }
+# Update h
+h <- rgamma(1, e_0*(1+cell_no), f_0+sum(r))
+```
+
+```{r}
+library(BayesLogit)
+# draw w
+w<- matrix(, cell_no,13)
+for (i in 1:13){
+  for (j in 1:cell_no){
+    w[j,i] <- rpg(1,df[j,i]+ r[j],phi[j,i])
+  }
+}
+```
+
+
+```{r}
+# Update beta
+sum_beta <- t(w) %*% x^2
+sigma_beta <- 1/(alpha+sum_beta)
+mu_beta <- rep(0, 13)
+for (i in 1:13){
+  for (j in 1:cell_no){
+    mu_beta[i] <- mu_beta[i]+((df[j,i]-r[j])/2-w[j,i]*(Phi[i,]%*%theta[j,]))*x[j]
+  }
+  mu_beta[i] <- mu_beta[i]*sigma_beta[i]
+}
+
+  
+for (i in 1:13){
+  beta[i] <- rnorm(1,mu_beta[i],sqrt(sigma_beta[i]))
+}
+```
+
+
+```{r}
+# Update Phi and theta
+for (i in 1:13){
+  sum_a <-matrix(0,K,K)
+  sum_b <- rep(0,K)
+  for (j in 1:cell_no){
+    sum_a <- sum_a+ w[j,i]*theta[j,]%*%t(theta[j,])
+    sum_b <- sum_b + ((df[j,i]-r[j])/2-w[j,i]*x[j]*beta[i])*theta[j,]
+  }
+  sigma_Phi <-  ginv(diag(K)+sum_a)
+  mu_Phi <- sigma_Phi %*% sum_b
+  Phi[i,] <- mvtnorm::rmvnorm(1, mean = mu_Phi, sigma = sigma_Phi)
+}
+```
+
+
+```{r}
+for (j in 1: cell_no){
+  sum_x <-matrix(0,K,K)
+  sum_y <- rep(0,K)
+  for (i in 1:13){
+    sum_x <- sum_x+ w[j,i]*Phi[i,]%*%t(Phi[i,])
+    
+    sum_y <- sum_y + ((df[j,i]-r[j])/2-w[j,i]*x[j]*beta[i])*Phi[i,]
+  }
+  sigma_theta <-  ginv(diag(gamma)+sum_x)
+  mu_theta <- sigma_theta %*% sum_y
+  theta[j,] <-mvtnorm::rmvnorm(1, mean = mu_theta, sigma = sigma_theta)
+  
+}
+
+```
+
+
+```{r}
+# Update alpha and gamma
+alpha <- rgamma(13, e_0+13/2,f_0+sum(beta^2)/2)
+for (k in 1:K){
+  gamma[k] <- rgamma(1, e_0+cell_no/2, f_0+sum(gamma[k]^2))
+}
+
+
+phi <- x %*% t(beta) + theta %*% t(Phi)
+p <- plogis(phi)
+
+
+```
+
+### Code
+```{r}
+library(parallel)
+out <- list(Phi=0*Phi,Beta=Beta,rj=0*rj,Theta=Theta)
+scnbr_v4 <- function(counts, X, K, ncores, Burnin = 1000L, Collections = 1000L, PGTruncation = 10L, randtry = 2017)
+{
+    
+    set.seed(randtry)
+    
+
+    # Initial values for X1 and X2
+    
+    y <- counts
+    V <- dim(y)[1]       # V
+    J <- dim(y)[2]     # J
+    # hyperparameters
+    a0 <- b0 <- 1
+    e0 <- f0 <- 0.01
+    
+    P <- dim(X)[1]      # X is P by J
+    
+    # Initialization
+
+    Beta <- matrix(0,P,V)
+    Phi <- matrix(1/V,V,K)
+    Theta <- matrix(0,K,J)
+    
+    rj <- rep(1,J)
+    h <- 1
+    gammat <- rep(1,K)
+    alpha <- rep(1,P)
+    
+    omegat <- matrix(0,V,J)
+    
+    Psi <- t(Beta) %*% X + Phi %*% Theta
+    
+    realmin <- .Machine$double.xmin
+    maxlogLike <- -Inf
+    
+    iterMax <- Burnin+Collections
+    
+    samples <- matrix(0, iterMax, 2)
+    samples[1, ] <- c(rj[1]*exp(Psi[1,1]), rj[1]*exp(Psi[2,1]))
+    # set up the cluster
+    cl <- parallel::makeCluster(ncores)           # Windows
+    # cl <- parallel::makeForkCluster(ncores)     # Forking
+    doParallel::registerDoParallel(cl)
+    
+    for (iter in 1:iterMax)
+    {
+        cat(iter, '\n')
+        
+        # sample r_j
+        ell <- CRT_matrix(y,matrix(rj,V,J,byrow = T))
+        temp <- logOnePlusExp(Psi)
+        rj <- rgamma(J, shape = e0+colSums(ell), rate = h+colSums(temp))
+        
+        # sample h
+        h <- rgamma(1, shape = e0+J*e0, rate = f0+sum(rj))
+        
+        for (v in 1:V){
+            # sample omega[v,]
+            omegat[v,] <- PolyaGamRnd_Gam(y[v,]+rj, Psi[v,], Truncation = PGTruncation)
+        }
+        
+        # sample Beta
+        Beta <- foreach(v=1:V,.combine = cbind) %dopar% {
+            omega <- omegat[v,]
+            sigmak <- X %*% diag(omega) %*% t(X)
+            diag(sigmak) <- diag(sigmak) + pmax(alpha,1e-3)
+            errMSG <- sum(eigen(sigmak)$values<=0)
+            if (errMSG == 0){
+                invchol <- chol(sigmak)
+            }else{
+                count_0 <- 0
+                while (errMSG != 0)
+                {
+                    diag(sigmak) <- diag(sigmak) + 10^(count_0-6)
+                    errMSG <- sum(eigen(sigmak)$values<=0)
+                    count_0 <- count_0 + 1
+                }
+                invchol <- chol(sigmak)
+            }
+            invchol <- solve(invchol)
+            muk <- X %*% t(0.5*(y[v,]-rj)-omega*t(Phi[v,]) %*% Theta)
+            invchol %*% (rnorm(P)+t(invchol) %*% muk)
+        }
+        
+        # sample Phi    
+        Phi <- foreach(v=1:V,.combine = rbind) %dopar%  {   
+            omega <- omegat[v,]
+            sigmak <- Theta %*% diag(omega) %*% t(Theta)
+            diag(sigmak) <- diag(sigmak) + 1
+            errMSG <- sum(eigen(sigmak)$values<=0)
+            if (errMSG == 0){
+                invchol <- chol(sigmak)
+            }else{
+                count_0 <- 0
+                while (errMSG != 0)
+                {
+                    diag(sigmak) <- diag(sigmak) + 10^(count_0-6)
+                    errMSG <- sum(eigen(sigmak)$values<=0)
+                    count_0 <- count_0 + 1
+                }
+                invchol <- chol(sigmak)
+            }
+            invchol <- solve(invchol)
+            muk <- Theta %*% t(0.5*(y[v,]-rj)-omega*t(Beta[,v]) %*% X )
+            t(invchol %*% (rnorm(K)+t(invchol) %*% muk))
+        }
+        
+        # sample Theta
+        Theta <- foreach(j=1:J,.combine = cbind) %dopar% {
+            omega <- omegat[,j]
+            sigmak <- t(Phi) %*% diag(omega) %*% Phi
+            diag(sigmak) <- diag(sigmak) + gammat
+            errMSG <- sum(eigen(sigmak)$values<=0)
+            if (errMSG == 0){
+                invchol <- chol(sigmak)
+            }else{
+                count_0 <- 0
+                while (errMSG != 0)
+                {
+                    diag(sigmak) <- diag(sigmak) + 10^(count_0-6)
+                    errMSG <- sum(eigen(sigmak)$values<=0)
+                    count_0 <- count_0 + 1
+                }
+                invchol <- chol(sigmak)
+            }
+            invchol <- solve(invchol)
+            muk <- t(Phi) %*% t(0.5*(y[,j]-rj[j])-omega*t(X[,j]) %*% Beta )
+            invchol %*% (rnorm(K)+t(invchol) %*% muk)
+        }
+        
+        Psi <- t(Beta) %*% X + Phi %*% Theta
+        
+        # sample gammat
+        gammat <- rgamma(K, e0+J/2, f0+rowSums(Theta^2)/2)
+        
+        # Sample alpha
+        alpha <- rgamma(P, 1 + V/2, rate = 1 + 0.5*rowSums(Beta^2))
+        
+        gc()
+        
+        if (iter>Burnin)
+        {
+            out$Beta <<- Beta + out$Beta
+            
+            out$rj <<- rj + out$rj
+            
+            logLike <- sum(lgamma(rj+t(y))) - V*sum(lgamma(rj)) - 
+                sum(y * logOnePlusExp(-Psi)) -
+                sum(matrix(rj,V,J,byrow = T) * logOnePlusExp(Psi))
+            
+            if(logLike > maxlogLike){
+                maxlogLike <- logLike
+                out$Phi <- Phi
+                out$Theta <- Theta
+            }
+        }
+        samples[iter, 1] <- rj[1]*exp(Psi[1,1])
+        samples[iter, 2] <- rj[1]*exp(Psi[2,1])
+    }
+    
+    parallel::stopCluster(cl)
+    
+    out$Beta <- out$Beta/Collections
+    out$rj <- out$rj/Collections
+    return(list(out=out,samples=samples))
+}
+```
+
+## fuctions
+### CRT_matrics
+```{r}
+CRT_matrix <- function(x,r)
+  ## Chinese Restaurant Table distribution with matrix input and matrix output
+  ## Siamak Zamani
+  ## Created Jul 2016    
+{
+  dyn.load("CRT_matrix.so")
+  if (sum(dim(x)!=dim(r))>0) stop('Inputs of CRT_matrix should have the same dimensions')
+  dx <- dim(x)
+  M <- dx[1]
+  N <- dx[2]
+  x <- c(x)
+  r <- c(r)
+  L <- rep(0, length(x))
+  
+  out <- .C("CRT_matrix", x=as.double(x), 
+            r=as.double(r), M=as.integer(M), N=as.integer(N), L=as.integer(L))
+  return(matrix(out$L, M, N))
+}
+```
+### logOnePlusExp
+```{r}
+logOnePlusExp <- function(x)
+# Mingyuan Zhou
+{
+    dex <- x<0
+    y <- matrix(0,dim(x)[1],dim(x)[2])
+    y[dex] <- log1p(exp(x[dex]))
+    y[!dex] <- x[!dex] + log1p(exp(-x[!dex]))
+    return(y)
+}
+```
+### PolyaGamRnd_Gam
+```{r}
+PolyaGamRnd_Gam <- function(a, c, Truncation=6L)
+# Coverted to R from MATLAB code by Mingyuan Zhou
+# Siamak Zamani, June 2016
+{
+    realmin <- 2.2251e-308
+    c <- abs(c)
+    idx <- a!=0       # 'a' should not be zero
+    a <- a[idx]
+    c <- c[idx]
+    
+    if (!is.null(a))
+    {
+        idx.c <- c!=0
+        c1 <- c[idx.c]
+        a1 <- a[idx.c]
+        
+        xmeanfull <- a/4
+        xmeanfull[idx.c] <- a1*tanh(c1/2)/(2*c1)
+        xvarfull <- a/24
+        
+        idx.c1 <- c>=1e-3
+        c1 <- c[idx.c1]
+        a1 <- a[idx.c1]
+        xvarfull[idx.c1] <- 0.5*exp(log(a1)-3*log(c1)+log(-expm1(-2*c1)-2*c1*exp(-c1))-log(1+exp(-2*c1)+2*exp(-c1)))
+        
+        idx.c1 <- c<1e-3
+        c1 <- c[idx.c1]
+        a1 <- a[idx.c1]
+        
+        xvarfull[idx.c1] <- 0.5*exp(log(a1)+ pmax(-3*log(c1)+log(-expm1(-2*c1)-2*c1*exp(-c1))-log(1+exp(-2*c1)+2*exp(-c1)), -log(12)-2*logcosh(c1/2), na.rm = T))
+        
+        if (Truncation>1)
+        {
+            temp <- matrix(((1:(Truncation-1))-0.5)^2, length(c), Truncation-1, byrow = T) + matrix(c^2/(4*pi^2), length(c), Truncation-1, byrow = F)
+            xmeantruncate <- 1/(2*pi^2)*a*rowSums(1/temp)
+            xmean <- pmax(xmeanfull - xmeantruncate,0)
+            xvartruncate <- 1/4/pi^4*a*rowSums(1/(temp)^2)
+            
+            x <- 1/2/pi^2*rowSums(matrix(rgamma(length(a)*(Truncation-1), rep(a,Truncation-1)), length(a), Truncation-1)/temp)
+            
+            xvar <- pmax(xvarfull - xvartruncate,0)
+            
+            dex1 <- xvarfull>=(xvartruncate+realmin)
+            
+            x[!dex1] <- x[!dex1] + xmean[!dex1]
+            if (sum(dex1)>0)
+            {
+                x[dex1] <- x[dex1] + rgamma(sum(dex1), xmean[dex1]^2/xvar[dex1],rate = 1) * (xvar[dex1]/xmean[dex1])
+            }
+            
+        }else{
+                cc <- xmeanfull/pmax(xvarfull,realmin)
+                aa <- xmeanfull*cc
+                x <- randg(aa)/pmax(cc,realmin)
+        }
+        
+        temp <- x
+        x <- rep(0,length(idx))
+        x[idx] <- temp
+            
+    }else 
+        x <- NULL
+    return(x)
+}
+```
+### logcosh
+```{r}
+logcosh <- function(x)
+{
+    return(abs(x)-log(2)+log1p(exp(-2*abs(x))))
+}
+```
+
+## test
+```{r}
+library(foreach)
+library(doParallel)
+ 
+df<- data1_cd4[c(protein_coding_genes)]
+df_0 <- selected_data1_cd4
+counts <- as.matrix(df)
+
+idx.nz <- rowSums(counts)!=0
+counts <- counts[idx.nz,]
+
+re<-scnbr_v4 (counts = t(counts), t(as.matrix(df_0[, ncol(df_0)])[idx.nz,]),  2,detectCores() - 1, Burnin = 1000L, Collections = 2000L, PGTruncation = 10L, randtry = 2017)
+```
+
+```{r}
+samples<- re$samples
+
+plot(samples[, 1], type = 'l', main = 'Trace plot for X1', xlab = 'Iteration', ylab = 'X1')
+plot(samples[, 2], type = 'l', main = 'Trace plot for X2', xlab = 'Iteration', ylab = 'X2')
+
+# Plot the joint distribution of X1 and X2
+plot(samples[, 1], samples[, 2], main = 'Joint distribution of X1 and X2', xlab = 'X1', ylab = 'X2')
+
+```
+
+```{r}
+library(ggplot2)
+par(new = TRUE) 
+n<-10
+out <- re$out
+col_name <-"MT.CO1"
+hist(df[,n],breaks = 30, main = paste("Histogram of", col_name), xlab = col_name, col = "blue")
+val <- rep(0, dim(counts)[1])
+X<- t(as.matrix(df_0[, ncol(df_0)])[idx.nz,])
+for (i in 1:dim(counts)[1] ){
+  p <- plogis( out$Beta[,n] *X[i]+ out$Phi[n,] %*% out$Theta[,i])
+  
+  val[i] <- rnbinom(1,size=out$rj[i], prob=1-p)
+}
+
+hist(val,breaks = 50,add=TRUE)
+summary(val)
+summary(df[,n])
+```
+```{r}
+m<- 3
+check <- rep(0,13)
+for (i in 1:13 ){
+  psi <- out$Beta[,i] *X[m]+ out$Phi[i,] %*% out$Theta[,m]
+  check[i] <- out$rj[m]*exp(psi)
+}
+check
+df[m,]
+out$rj
+```
+
+

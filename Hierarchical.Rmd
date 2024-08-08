@@ -1,0 +1,130 @@
+---
+title: "Bayesian_learn"
+output: html_document
+date: "2024-07-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Chapter 10
+
+### Initialize
+
+```{r movies}
+moviedata <- read.csv("learning_data/2010_animation_ratings.csv")
+str(moviedata)
+library(ggplot2)
+```
+
+### Print a jittered dotplot
+
+```{r pressure, echo=FALSE}
+x<- moviedata$rating
+y<- moviedata$title
+moviedata$title <- sub("[[:punct:]].*", "", moviedata$title)
+data <- data.frame(x = x, y = y)
+ggplot(data, aes(x = x, y =moviedata$title ,colour = moviedata$title)) +
+  geom_jitter(width = 0.2, height = 0.2, pch = 16)
+  labs(title = "Jittered Dotplot", x = "Category", y = "Value") +
+  theme_minimal()
+
+```
+
+### Get an overview table
+
+```{r}
+library(dplyr)
+overview_table <- data.frame(x = moviedata$title,y=moviedata$rating) %>%
+  group_by(moviedata$title) %>%
+  summarise(
+    mean = round(mean(y),3),
+    sd = round(sd(y),3),
+    count = n()
+  )
+print(overview_table)
+```
+
+### Inference through MCMC
+
+```{r}
+library(rjags)
+
+modelString <-"
+model {
+# sampling
+for (i in 1:N){
+  y[i] ~ dnorm(mu_j[MovieIndex[i]], invsigma_2)
+}
+
+# priors
+mu_j ~ dnorm(J,mu, invsigma_1)
+
+invsigma_2 ~ dgamma(a1_0,b1_0)
+sigma_2 <- sqrt(pow(invsigma_2, -1))
+
+#hyperpriors
+mu ~ dnorm(mu_0, g_0)
+invsigma_1 ~ dgamma(a0_0, b0_0)
+sigma_1 <- sqrt(pow(invsigma_1, -1))
+}
+"
+
+
+#define the data
+ratings <- moviedata$rating
+MovieIndex <- moviedata$Group_Number
+N <- length(ratings)
+J <- length(unique(MovieIndex))
+moviedata_modelling <- list("y"= ratings, "MovieIndex"=MovieIndex,
+                            "N"=N, "J"=J,
+                            "a1_0"=1, "b1_0"=1,
+                            "a0_0"=1, "b0_0"=1,
+                            "mu_0"=3, "g_0"=1)
+
+#get the posteriors
+library(coda)
+library(runjags)
+initsfunction <- function(chain){
+  .RNG.seed <- c(1,2)[chain]
+  .RNG.name <- c("base::Super-Duper",
+                 "base::Wichmann-Hill")[chain]
+  return(list(.RNG.seed=.RNG.seed,
+              .RNG.name=.RNG.name))
+}
+posterior <- run.jags(modelString,
+                      n.chains = 1,
+                      data= moviedata_modelling,
+                      monitor = c("mu", "sigma_2", "mu_j", "sigma_1"),
+                      adapt = 1000,
+                     
+                      sample = 5000,
+                      inits = initsfunction)
+```
+```{r}
+plot(posterior, vars = "sigma_2")
+
+```
+
+
+```{r}
+library("BayesLogit")
+
+v <- rep(0.01,5)
+
+a<- c(0,1,0)
+b<-c(2,2)
+c<-a%*% t(b)
+K<-4
+cell_no <- 10
+theta <- matrix(0, cell_no, K)
+gamma <- rgamma(cell_no, 1, 1)
+for (k in 1: K){
+    theta[,k] <-rnorm(cell_no,0,1/sqrt(gamma[k]))
+}
+mat <- matrix(rep(a, 2),nrow = length(a), ncol = 2)
+mat[1,]%*%t(mat[1,])
+A<-as.matrix(a)
+dim(A)
+```
