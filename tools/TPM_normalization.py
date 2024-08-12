@@ -1,7 +1,8 @@
 import pandas as pd
 gene_length = pd.read_csv("mt-datasets/gene_length.csv")
 
-def TPM(df):  
+
+def TPM(df):
     df = df[gene_length.columns]
 
     # Divide the read counts by the length of each gene
