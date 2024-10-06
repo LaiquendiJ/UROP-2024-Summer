@@ -423,7 +423,7 @@ p <- plogis(phi)
 ### Code
 ```{r}
 library(parallel)
-out <- list(Phi=0*Phi,Beta=Beta,rj=0*rj,Theta=Theta)
+
 scnbr_v4 <- function(counts, X, K, ncores, Burnin = 1000L, Collections = 1000L, PGTruncation = 10L, randtry = 2017)
 {
     
@@ -580,8 +580,8 @@ scnbr_v4 <- function(counts, X, K, ncores, Burnin = 1000L, Collections = 1000L, 
                 out$Theta <- Theta
             }
         }
-        samples[iter, 1] <- rj[1]*exp(Psi[1,1])
-        samples[iter, 2] <- rj[1]*exp(Psi[2,1])
+        samples[iter, 1] <- e0+colSums(ell)
+        samples[iter, 2] <-  h+colSums(temp)
     }
     
     parallel::stopCluster(cl)
@@ -733,29 +733,82 @@ par(new = TRUE)
 n<-10
 out <- re$out
 col_name <-"MT.CO1"
-hist(df[,n],breaks = 30, main = paste("Histogram of", col_name), xlab = col_name, col = "blue")
+
+hist(df[,n],breaks = 30, main = paste("Histogram of", col_name), xlab = col_name, col = "grey")
 val <- rep(0, dim(counts)[1])
 X<- t(as.matrix(df_0[, ncol(df_0)])[idx.nz,])
-for (i in 1:dim(counts)[1] ){
-  p <- plogis( out$Beta[,n] *X[i]+ out$Phi[n,] %*% out$Theta[,i])
-  
-  val[i] <- rnbinom(1,size=out$rj[i], prob=1-p)
+for (j in 1:13){
+  for (i in 1:dim(counts)[1]){
+    p <- plogis( out$Beta[,n] *X[i]+ out$Phi[n,] %*% out$Theta[,i])
+    val[i] <- rnbinom(1,size=out$rj[i], prob=1-p)
+  }
 }
 
-hist(val,breaks = 50,add=TRUE)
+hist(val,breaks = 50,add=TRUE,col = rgb(0.1, 0.5, 0.8, alpha = 0.5))
 summary(val)
 summary(df[,n])
 ```
 ```{r}
-m<- 3
-check <- rep(0,13)
-for (i in 1:13 ){
-  psi <- out$Beta[,i] *X[m]+ out$Phi[i,] %*% out$Theta[,m]
-  check[i] <- out$rj[m]*exp(psi)
+df_pre<- matrix(0,dim(counts)[1],13)
+
+X<- t(as.matrix(df_0[, ncol(df_0)])[idx.nz,])
+
+for (n in 1:13){
+  for (i in 1:dim(counts)[1] ){
+    p <- plogis( out$Beta[,n] *X[i]+ out$Phi[n,] %*% out$Theta[,i])
+    df_pre[i,n] <- rnbinom(1,size=out$rj[i], prob=1-p)
+  }
 }
-check
-df[m,]
-out$rj
+write.csv(df_pre, file = "gibbs_results.csv", row.names = FALSE)
+```
+
+
+```{r}
+set.seed(42)
+y <- rnbinom(20, size = 3, prob = 0.2)
+
+prior_r <- function(r) {
+  return(dpois(r, lambda = 2, log = T))
+}
+
+prior_prob <- function(prob) {
+  return(dunif(prob, min = 0, max = 1, log = TRUE))
+}
+
+loglikelihood <- function(data, r, prob) {
+  loglikelihoodValue <- sum(dnbinom(data, size = r, prob = prob, log = TRUE))
+  return(loglikelihoodValue)
+}
+
+joint <- function(r, prob) {
+  return(loglikelihood(y, r, prob) + prior_r(r) + prior_prob(prob))
+}
+
+run_mcmc <- function(startvalue, iterations) {
+  
+  chain <- array(dim = c(iterations + 1, 2))
+  
+  chain[1, ] <- startvalue
+  
+  for (i in 1:iterations) {
+    proposal_r <- rpois(1, lambda = chain[i, 1])
+    proposal_prob <- chain[i, 2] + runif(1, min = max(-0.2, -chain[i,2]), max = min(0.2, 1 - chain[i,2]))
+    quotient <- joint(proposal_r, proposal_prob) - joint(chain[i, 1], chain[i, 2])
+    
+    if (runif(1, 0, 1) < min(1, exp(quotient))) {
+      chain[i + 1, ] <- c(proposal_r, proposal_prob)
+    } else {
+      chain[i + 1, ] <- chain[i, ]
+    }
+  }
+  
+  return(chain)
+}
+
+iterations <- 2000
+startvalue <- c(4, 0.25)
+res <- run_mcmc(startvalue, iterations)
+colMeans(res)
 ```
 
 

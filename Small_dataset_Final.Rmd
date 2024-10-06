@@ -177,8 +177,8 @@ scnbr_v4 <- function(counts, X, K, ncores, Burnin = 1000L, Collections = 1000L, 
                 out$Theta <- Theta
             }
         }
-        samples[iter, 1] <- rj[1]*exp(Psi[1,1])
-        samples[iter, 2] <- rj[1]*exp(Psi[2,1])
+        samples[iter, 1] <- mean(e0+colSums(ell))
+        samples[iter, 2] <-  mean(h+colSums(temp))
     }
     
     parallel::stopCluster(cl)
@@ -313,6 +313,9 @@ counts <- counts[idx.nz,]
 
 re<-scnbr_v4 (counts = t(counts), X=t(as.matrix(df_0[, ncol(df_0)])[idx.nz,]),  K=2,detectCores() - 1, Burnin = 100L, Collections = 100L, PGTruncation = 10L, randtry = 2017)
 ```
+```{r}
+summary(re$out$rj)
+```
 
 ```{r}
 samples<- re$samples
@@ -321,13 +324,9 @@ plot(samples[, 1], type = 'l', main = 'Trace plot for X1', xlab = 'Iteration', y
 plot(samples[, 2], type = 'l', main = 'Trace plot for X2', xlab = 'Iteration', ylab = 'X2')
 
 # Plot the joint distribution of X1 and X2
-plot(samples[, 1], samples[, 2], main = 'Joint distribution of X1 and X2', xlab = 'X1', ylab = 'X2')
+
 ```
 
-```{r}
-dim(out$Beta)
-out$Phi[1,] %*% out$Theta[,1]
-```
 
 
 ```{r}
@@ -336,34 +335,84 @@ par(new = TRUE)
 n<-1
 out <- re$out
 col_name <-"MT.CO1"
-hist(df[,n], breaks=30,main = paste("Histogram of", col_name), xlab = col_name, col = "blue")
+hist(df[,n], breaks=30,main = paste("Histogram of", col_name), xlab = col_name, col = "grey")
 val <- rep(0, dim(counts)[1])
 X<- t(as.matrix(df_0[, ncol(df_0)])[idx.nz,])
 for (i in 1:dim(counts)[1] ){
   p <- plogis( out$Beta[,n] *X[i]+ out$Phi[n,] %*% out$Theta[,i])
   val[i] <- rnbinom(1,out$rj[i],1- p)
 }
-hist(val,breaks=50,add=TRUE)
+hist(val,breaks=50,add=TRUE,col = rgb(0.1, 0.5, 0.8, alpha = 0.5))
 summary(val)
 summary(df[,n])
+```
+```{r}
+remove_outliers <- function(x, na.rm = TRUE, ...) {
+  qnt <- quantile(x, probs=c(.25, .75), na.rm = na.rm, ...)
+  H <- 1.5 * IQR(x, na.rm = na.rm)
+  y <- x
+  y[x < (qnt[1] - H)] <- NA
+  y[x > (qnt[2] + H)] <- NA
+  y
+}
+```
+
+
+
+```{r}
+df_pre<- matrix(0,dim(counts)[1],13)
+
+X<- t(as.matrix(df_0[, ncol(df_0)])[idx.nz,])
+
+for (n in 1:13){
+  for (i in 1:dim(counts)[1] ){
+    p <- plogis( out$Beta[,n] *X[i]+ out$Phi[n,] %*% out$Theta[,i])
+    
+    df_pre[i,n] <- rnbinom(1,size=out$rj[i], prob=1-p)
+  }
+}
 ```
 
 
 ```{r}
-x_dnbinom <- seq(0, 100, by = 1) 
-y_dnbinom <- dnbinom(x_dnbinom, size = 48.85, prob =1- 0.38688)
-plot(y_dnbinom)  
-logit <- function(p) {
-  if (any(p <= 0 | p >= 1)) {
-    stop("p must be in the interval (0, 1)")
+# Identify outliers using IQR
+filter_outliers <- function(data1,data2){
+  Q1_1 <- quantile(data1, 0.25)
+  Q3_1 <- quantile(data1, 0.75)
+  IQR_1 <- Q3_1 - Q1_1
+  bol_1 <- data1 < (Q3_1 + 2.5 * IQR_1)
+  Q1_2 <- quantile(data2, 0.25)
+  Q3_2<- quantile(data2, 0.75)
+  IQR_2 <- Q3_2 - Q1_2
+  bol_2 <- data2 < (Q3_2+ 2.5 * IQR_2)
+  bol <- as.logical(bol_1*bol_2)
+  return(data.frame(x=data1[bol],y=data2[bol]))
+}
+```
+
+
+```{r}
+
+colnames(df_pre) <- protein_coding_genes
+for (i in 1:13) {
+  for (j in 1:13) {
+    if (i < j) {
+      # Filter outliers (assuming the function is defined)
+      li <- filter_outliers(df_pre[, i], df_pre[, j])
+      
+      # Create a heat map
+      p <- ggplot(li, aes(x = x, y = y)) +
+        geom_bin2d(bins = 50) +  # Adjust bins to your preference
+        scale_fill_gradient(low = "blue", high = "red") +
+        ggtitle(sprintf('Heatmap of %s and %s', colnames(df_pre)[i], colnames(df_pre)[j])) +
+        xlab(colnames(df_pre)[i]) +
+        ylab(colnames(df_pre)[j])
+      
+      # Print the plot
+      print(p)
+    }
   }
-  log(p / (1 - p))
 }
 
-library(boot)
-
-# Cross-validation
-cv_results <- cv.glm(data = my_data, glmfit = glm_model, K = 10)
-print(cv_results$delta)
 ```
 
